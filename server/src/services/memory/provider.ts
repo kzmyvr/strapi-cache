@@ -17,43 +17,67 @@ export class InMemoryCacheProvider implements CacheProvider {
       return;
     }
 
-    this.initialized = true;
+    try {
+      const max = Number(this.strapi.plugin('strapi-cache').config('max')) || 1000;
+      const ttl = Number(this.strapi.plugin('strapi-cache').config('ttl')) || 1000 * 60 * 60;
+      const size = Number(this.strapi.plugin('strapi-cache').config('size')) || 1024 * 1024 * 10;
+      const allowStale = Boolean(this.strapi.plugin('strapi-cache').config('allowStale')) || false;
 
-    const max = Number(this.strapi.plugin('strapi-cache').config('max'));
-    const ttl = Number(this.strapi.plugin('strapi-cache').config('ttl'));
-    const size = Number(this.strapi.plugin('strapi-cache').config('size'));
-    const allowStale = Boolean(this.strapi.plugin('strapi-cache').config('allowStale'));
+      // Validate configuration values
+      if (max <= 0) throw new Error('max must be greater than 0');
+      if (ttl < 0) throw new Error('ttl must be non-negative');
+      if (size <= 0) throw new Error('size must be greater than 0');
 
-    this.provider = new LRUCache({
-      max,
-      ttl,
-      size,
-      allowStale,
-    });
+      this.provider = new LRUCache({
+        max,
+        ttl,
+        size,
+        allowStale,
+        updateAgeOnGet: true,
+        noDisposeOnSet: true,
+      });
 
-    this.cacheGetTimeoutInMs = Number(
-      this.strapi.plugin('strapi-cache').config('cacheGetTimeoutInMs')
-    );
+      this.cacheGetTimeoutInMs = Number(
+        this.strapi.plugin('strapi-cache').config('cacheGetTimeoutInMs')
+      ) || 1000;
 
-    loggy.info('Provider initialized');
+      if (this.cacheGetTimeoutInMs <= 0) {
+        this.cacheGetTimeoutInMs = 1000;
+      }
+
+      this.initialized = true;
+      loggy.info('Provider initialized');
+    } catch (error) {
+      loggy.error(`Failed to initialize provider: ${error}`);
+      throw error;
+    }
   }
 
   get ready(): boolean {
-    if (!this.initialized) {
-      loggy.info('Provider not initialized');
-      return false;
-    }
-
-    return true;
+    return this.initialized && this.provider !== undefined;
   }
 
   async get(key: string): Promise<any | null> {
-    if (!this.ready) return null;
+    if (!this.ready) {
+      loggy.warn('Provider not ready for get operation');
+      return null;
+    }
+
+    if (!key || typeof key !== 'string') {
+      loggy.warn('Invalid key provided for get operation');
+      return null;
+    }
 
     return withTimeout(
       () =>
         new Promise((resolve) => {
-          resolve(this.provider.get(key));
+          try {
+            const result = this.provider.get(key);
+            resolve(result);
+          } catch (error) {
+            loggy.error(`Error during provider get: ${error}`);
+            resolve(null);
+          }
         }),
       this.cacheGetTimeoutInMs
     ).catch((error) => {
@@ -63,7 +87,15 @@ export class InMemoryCacheProvider implements CacheProvider {
   }
 
   async set(key: string, val: any): Promise<any | null> {
-    if (!this.ready) return null;
+    if (!this.ready) {
+      loggy.warn('Provider not ready for set operation');
+      return null;
+    }
+
+    if (!key || typeof key !== 'string') {
+      loggy.warn('Invalid key provided for set operation');
+      return null;
+    }
 
     try {
       return this.provider.set(key, val);
@@ -74,7 +106,15 @@ export class InMemoryCacheProvider implements CacheProvider {
   }
 
   async del(key: string): Promise<any | null> {
-    if (!this.ready) return null;
+    if (!this.ready) {
+      loggy.warn('Provider not ready for delete operation');
+      return null;
+    }
+
+    if (!key || typeof key !== 'string') {
+      loggy.warn('Invalid key provided for delete operation');
+      return null;
+    }
 
     try {
       loggy.info(`PURGING KEY: ${key}`);
@@ -86,7 +126,10 @@ export class InMemoryCacheProvider implements CacheProvider {
   }
 
   async keys(): Promise<string[] | null> {
-    if (!this.ready) return null;
+    if (!this.ready) {
+      loggy.warn('Provider not ready for keys operation');
+      return null;
+    }
 
     try {
       return Array.from(this.provider.keys());
@@ -97,7 +140,10 @@ export class InMemoryCacheProvider implements CacheProvider {
   }
 
   async reset(): Promise<any | null> {
-    if (!this.ready) return null;
+    if (!this.ready) {
+      loggy.warn('Provider not ready for reset operation');
+      return null;
+    }
 
     try {
       const allKeys = await this.keys();
@@ -113,8 +159,18 @@ export class InMemoryCacheProvider implements CacheProvider {
   }
 
   async clearByRegexp(regExps: RegExp[]): Promise<void> {
-    const keys = (await this.keys()) || [];
-    const matches = keys.filter((key) => regExps.some((re) => re.test(key)));
-    await Promise.all(matches.map((key) => this.del(key)));
+    if (!this.ready) {
+      loggy.warn('Provider not ready for clearByRegexp operation');
+      return;
+    }
+
+    try {
+      const keys = (await this.keys()) || [];
+      const matches = keys.filter((key) => regExps.some((re) => re.test(key)));
+      await Promise.all(matches.map((key) => this.del(key)));
+      loggy.info(`Cleared ${matches.length} keys matching regex patterns`);
+    } catch (error) {
+      loggy.error(`Error during clearByRegexp: ${error}`);
+    }
   }
 }
